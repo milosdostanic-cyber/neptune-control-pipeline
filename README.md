@@ -28,6 +28,8 @@ The chart belongs to the Neptune account signed into the app. A personal account
 
 ## How it works
 
+[How does the widget know your Cursor / Claude account?](docs/account-detection.md)
+
 ![Neptune Hooks and Neptune Control pipeline](docs/images/neptune-pipeline.png)
 
 Read the [high-level pipeline](docs/pipeline.md), edit the [Mermaid source](docs/pipeline.mmd), or open the [editable Figma diagram](https://www.figma.com/design/E587bvgdGPwtnpo4bfd4lh/Untitled?node-id=3-2).

@@ -18,6 +18,8 @@ Each event is checked independently. The guard runs when a hook is invoked, even
 
 ## View and control activity
 
+See the [simple account-detection flow](account-detection.md) for how Cursor and Claude account state reaches the widget.
+
 - **Neptune Control** shows local account and connection states and lets the user enable or disable collection for each app.
 - **Neptune sign-in** connects the user's own SpaceInch Neptune account. The app reads that account's coding sessions and compares Claude Code and Cursor token totals for the last 30 calendar days, including today. Totals include input, output, cache-read and cache-write tokens.
 - **The optional macOS widget** reads a local, credential-free status snapshot written by the running app. It shows Claude Code and Cursor connection status on the desktop or in Notification Center.

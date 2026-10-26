@@ -1,0 +1,5 @@
+flowchart LR
+    sources["Cursor local account cache / Claude desktop and live Code identities"] --> control["Neptune Control reads identity and checks collection readiness"]
+    control --> snapshot["Local status.json without account emails or credentials"]
+    snapshot --> kit["WidgetKit reads the file and schedules updates"]
+    kit --> widget["Widget shows ready, blocked or outdated status"]
