@@ -1,0 +1,11 @@
+flowchart LR
+    activity["Claude Code / Cursor activity"] --> hooks["Installed Neptune hooks"]
+    hooks --> guard{"Collection enabled and verified SpaceInch identity for this event?"}
+    guard -->|"Yes"| original["Saved original Neptune scripts"]
+    original -->|"Upload approved activity"| neptune["Neptune platform"]
+    guard -->|"No"| skip["Skip collection; work continues"]
+    signIn["Your SpaceInch Neptune sign-in"] -->|"Own coding sessions"| app["Neptune Control: controls and last-30-day token chart"]
+    app -.->|"Configure collection"| guard
+    app -->|"Write local state"| snapshot["Credential-free status snapshot"]
+    snapshot --> widget["Optional desktop / Notification Center widget"]
+    widget -->|"My stats"| browser["Neptune statistics in browser"]
