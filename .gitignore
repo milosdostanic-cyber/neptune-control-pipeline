@@ -1,1 +1,8 @@
+.build/
+build/
+work/
 .DS_Store
+.env
+.env.*
+*.xcuserstate
+xcuserdata/
