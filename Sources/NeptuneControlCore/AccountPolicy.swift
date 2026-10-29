@@ -49,21 +49,26 @@ public enum AccountPolicy {
     /// Decisions use identity attached to this hook execution, never the UI's cached email.
     /// Missing, conflicting, non-company or unsupported auth identities always deny collection.
     public static func permits(_ target: HookTarget, payload: Data, environment: [String: String]) -> Bool {
-        guard let event = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return false }
+        denial(target, payload: payload, environment: environment) == nil
+    }
+
+    /// The same decision as `permits`, with the reason an event is denied. Nil means permitted.
+    public static func denial(_ target: HookTarget, payload: Data, environment: [String: String]) -> BlockReason? {
+        guard let event = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return .unverified }
         if target == .cursor {
             guard let fromEvent = event["user_email"] as? String,
-                  let fromProcess = environment["CURSOR_USER_EMAIL"],
-                  isAllowed(fromEvent), isAllowed(fromProcess),
-                  fromEvent.lowercased() == fromProcess.lowercased() else { return false }
-            return true
+                  let fromProcess = environment["CURSOR_USER_EMAIL"] else { return .unverified }
+            guard isAllowed(fromEvent), isAllowed(fromProcess) else { return .personalAccount }
+            return fromEvent.lowercased() == fromProcess.lowercased() ? nil : .accountMismatch
         }
-        guard let email = environment["CLAUDE_CODE_USER_EMAIL"], isAllowed(email),
-              let account = environment["CLAUDE_CODE_ACCOUNT_UUID"], !account.isEmpty else { return false }
+        guard let email = environment["CLAUDE_CODE_USER_EMAIL"] else { return .unverified }
+        guard isAllowed(email) else { return .personalAccount }
+        guard let account = environment["CLAUDE_CODE_ACCOUNT_UUID"], !account.isEmpty else { return .unverified }
         for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
-            if !(environment[key] ?? "").isEmpty { return false }
+            if !(environment[key] ?? "").isEmpty { return .unsupportedLogin }
         }
-        if let other = event["user_email"] as? String, other.lowercased() != email.lowercased() { return false }
-        return true
+        if let other = event["user_email"] as? String, other.lowercased() != email.lowercased() { return .accountMismatch }
+        return nil
     }
 }
 

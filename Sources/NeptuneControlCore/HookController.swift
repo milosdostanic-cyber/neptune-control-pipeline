@@ -426,18 +426,27 @@ public final class HookController: @unchecked Sendable {
             }
             return 0
         }
-        guard isArmed(target), AccountPolicy.permits(target, payload: payload, environment: environment) else { return neutral() }
+        let activity = ActivityLog(storage: storage)
+        let blocked: (BlockReason) -> Int32 = { reason in
+            activity.record(target, .blocked(reason))
+            return neutral()
+        }
+        let denial = { () -> BlockReason? in
+            guard self.isArmed(target) else { return .collectionOff }
+            return AccountPolicy.denial(target, payload: payload, environment: environment)
+        }
+        if let reason = denial() { return blocked(reason) }
         do {
-            guard script == URL(fileURLWithPath: script).lastPathComponent, script.hasSuffix(".sh") else { return neutral() }
+            guard script == URL(fileURLWithPath: script).lastPathComponent, script.hasSuffix(".sh") else { return blocked(.integrity) }
             let snapshotData = try Data(contentsOf: storage.appendingPathComponent("Snapshots/\(target.rawValue).json"))
             let snapshot = try JSONDecoder().decode(HookSnapshot.self, from: snapshotData)
             try validate(snapshot, target: target)
-            guard let record = snapshot.scripts.first(where: { $0.path == script }) else { return neutral() }
+            guard let record = snapshot.scripts.first(where: { $0.path == script }) else { return blocked(.integrity) }
             let path = try safeChild(script, in: originalsURL(target))
             try ensureNotSymlink(path)
-            guard try Data(contentsOf: path) == record.bytes else { return neutral() }
+            guard try Data(contentsOf: path) == record.bytes else { return blocked(.integrity) }
             // Recheck after all IO, immediately before granting the original script any input.
-            guard isArmed(target), AccountPolicy.permits(target, payload: payload, environment: environment) else { return neutral() }
+            if let reason = denial() { return blocked(reason) }
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
             task.arguments = [path.path]
@@ -450,8 +459,9 @@ public final class HookController: @unchecked Sendable {
             pipe.fileHandleForWriting.write(payload)
             try pipe.fileHandleForWriting.close()
             task.waitUntilExit()
+            activity.record(target, task.terminationStatus == 0 ? .sent : .failed)
             return task.terminationStatus
-        } catch { return neutral() }
+        } catch { return blocked(.integrity) }
     }
 
     private func disabledScript(for target: HookTarget, original: ScriptRecord) -> Data {

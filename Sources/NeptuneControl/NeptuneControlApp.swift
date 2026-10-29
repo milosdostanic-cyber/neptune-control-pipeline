@@ -16,6 +16,7 @@ private enum Palette {
 @MainActor
 final class ControlModel: ObservableObject {
     @Published var statuses: [HookStatus] = []
+    @Published var activity: [HookTarget: ActivitySummary] = [:]
     @Published var busy = false
     @Published var message: String?
     @Published var error: String?
@@ -61,6 +62,8 @@ final class ControlModel: ObservableObject {
         }
         do { try controller.prepareProtection() }
         catch { self.error = error.localizedDescription }
+        let activityLog = ActivityLog(storage: controller.storage)
+        statusQueue.async { activityLog.prune() }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == false { self?.refresh() } }
@@ -75,18 +78,19 @@ final class ControlModel: ObservableObject {
         guard !refreshing else { refreshAgain = true; return }
         refreshing = true
         Task {
-            let (fresh, protectionError) = await onStatusQueue { controller -> ([HookStatus], String?) in
+            let (fresh, freshActivity, protectionError) = await onStatusQueue { controller -> ([HookStatus], [HookTarget: ActivitySummary], String?) in
                 var protectionError: String?
                 if controller.competingInstallerPresent {
                     do { try controller.prepareProtection() }
                     catch { protectionError = error.localizedDescription }
                 }
-                return (controller.statuses(), protectionError)
+                return (controller.statuses(), ActivityLog(storage: controller.storage).summary(), protectionError)
             }
             if let protectionError { error = protectionError }
             if statuses.map({ $0.account.email }) != fresh.map({ $0.account.email }) { message = nil }
-            // Publishing identical statuses would redraw the window and menu bar item every tick.
+            // Publishing identical values would redraw the window and menu bar item every tick.
             if statuses != fresh { statuses = fresh }
+            if activity != freshActivity { activity = freshActivity }
             publishWidgetStatus()
             refreshing = false
             if refreshAgain {
@@ -243,7 +247,7 @@ private struct ControlView: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Palette.line.opacity(0.45)))
 
-            UsagePanel(model: model)
+            ActivityPanel(model: model)
 
             if let error = model.error {
                 Text(error).font(.system(size: 12)).foregroundStyle(.orange)
@@ -288,80 +292,115 @@ private struct ControlView: View {
     }
 }
 
-private struct UsagePanel: View {
+private struct ActivityPanel: View {
     @ObservedObject var model: ControlModel
 
-    private var periodLabel: String {
-        let range = NeptuneMonthlyStats.usageRange()
-        let input = DateFormatter()
-        input.locale = Locale(identifier: "en_US_POSIX"); input.dateFormat = "yyyy-MM-dd"
-        let output = DateFormatter()
-        output.locale = Locale(identifier: "en_US"); output.dateFormat = "MMM d"
-        guard let first = input.date(from: range.start), let last = input.date(from: range.end) else { return "Last 30 days" }
-        return "Last 30 days · \(output.string(from: first)) – \(output.string(from: last))"
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Token usage").font(.system(size: 16, weight: .semibold))
-                    Text(periodLabel).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if model.statsClient?.loading == true {
-                    ProgressView().controlSize(.small).accessibilityLabel("Refreshing usage")
-                } else {
-                    Button { model.statsClient?.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.borderless).help("Refresh usage").accessibilityLabel("Refresh usage")
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Today").font(.system(size: 16, weight: .semibold))
+                Text("Events checked by the account guard on this Mac").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            VStack(spacing: 16) {
+                ForEach(HookTarget.allCases, id: \.rawValue) { target in
+                    ActivityRow(target: target, summary: model.activity[target] ?? ActivitySummary())
                 }
             }
-            if let stats = model.freshStats {
-                let peak = max(stats.apps.map(\.tokens).max() ?? 0, 1)
-                VStack(spacing: 18) {
-                    ForEach(HookTarget.allCases, id: \.rawValue) { target in
-                        if let app = stats.app(target.rawValue) {
-                            VStack(alignment: .leading, spacing: 7) {
-                                HStack {
-                                    Text(target.title).font(.system(size: 12, weight: .medium))
-                                    Spacer()
-                                    Text(app.tokenLabel).font(.system(size: 20, weight: .semibold, design: .rounded)).monospacedDigit()
-                                }
-                                GeometryReader { proxy in
-                                    ZStack(alignment: .leading) {
-                                        Capsule().fill(Color.primary.opacity(0.06))
-                                        Capsule().fill(target == .claudeCode ? Color(red: 0.82, green: 0.48, blue: 0.36) : Color(red: 0.24, green: 0.62, blue: 0.75))
-                                            .frame(width: proxy.size.width * CGFloat(app.tokens) / CGFloat(peak))
-                                    }
-                                }.frame(height: 10)
-                            }
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("\(target.title), \(app.tokens.formatted()) tokens in the last 30 days")
-                            .help("\(app.tokens.formatted()) tokens · \(app.sessions) sessions recorded in Neptune")
-                        }
+            if !warnings.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(warnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11)).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                HStack(alignment: .firstTextBaseline) {
-                    if let email = model.statsClient?.accountEmail {
-                        Text(email).lineLimit(1).truncationMode(.middle)
-                    } else { Text("From Neptune") }
-                    Spacer(minLength: 8)
-                    Text("Input, output & cache")
-                }.font(.system(size: 10)).foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(model.statsClient?.loading == true ? "Loading your Neptune usage…" : "Connect Neptune to see your usage.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                    if model.statsClient?.loading != true {
-                        Button("Connect Neptune") { model.showStatsConnection = true }.controlSize(.small)
-                    }
-                }.frame(maxWidth: .infinity, minHeight: 100, alignment: .leading)
             }
+            Text("Sent means Neptune's script finished without an error on this Mac. My stats shows what Neptune recorded.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Palette.line.opacity(0.45)))
     }
+
+    /// Shown only when something needs attention.
+    private var warnings: [String] {
+        var result: [String] = []
+        for target in HookTarget.allCases {
+            let summary = model.activity[target] ?? ActivitySummary()
+            if summary.failed > 0 {
+                result.append("\(target.title): Neptune's script failed \(summary.failed.formatted()) \(summary.failed == 1 ? "time" : "times") today.")
+            }
+            if let count = summary.blocked[.integrity] {
+                result.append("\(target.title): the protection check stopped \(count.formatted()) \(count == 1 ? "event" : "events"). Turn collection off and on to restore the saved scripts.")
+            }
+        }
+        if model.statuses.contains(where: \.globallyPaused) { result.append("Neptune is paused globally, so no events are sent.") }
+        return result
+    }
+}
+
+private struct ActivityRow: View {
+    let target: HookTarget
+    let summary: ActivitySummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(target.title).font(.system(size: 12, weight: .medium))
+                Spacer()
+                count(summary.sent, "sent")
+                Text("·").foregroundStyle(.tertiary)
+                count(summary.blockedTotal, "blocked")
+            }
+            GeometryReader { proxy in
+                let total = CGFloat(max(summary.total, 1))
+                HStack(spacing: summary.total > 0 ? 2 : 0) {
+                    Capsule().fill(Color.green).frame(width: proxy.size.width * CGFloat(summary.sent) / total)
+                    Capsule().fill(Color.orange).frame(width: proxy.size.width * CGFloat(summary.failed) / total)
+                    Capsule().fill(Color.secondary.opacity(0.5)).frame(width: proxy.size.width * CGFloat(summary.blockedTotal) / total)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+            }.frame(height: 6)
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                Text(detail(now: context.date)).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(target.title): \(summary.sent) sent, \(summary.blockedTotal) blocked today. \(detail(now: Date()))")
+    }
+
+    private func count(_ value: Int, _ label: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(value.formatted()).font(.system(size: 18, weight: .semibold, design: .rounded)).monospacedDigit()
+            Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
+    private func detail(now: Date) -> String {
+        guard summary.total > 0 else { return "No events today" }
+        var parts: [String] = []
+        if let last = summary.lastSent {
+            parts.append("Last sent " + (now.timeIntervalSince(last) < 60 ? "just now" : Self.relative.localizedString(for: last, relativeTo: now)))
+        } else {
+            parts.append("Nothing sent today")
+        }
+        let reasons = summary.blocked.sorted { $0.value == $1.value ? $0.key.rawValue < $1.key.rawValue : $0.value > $1.value }
+        if !reasons.isEmpty {
+            parts.append("Blocked: " + reasons.map { "\($0.key.label) (\($0.value.formatted()))" }.joined(separator: ", "))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static let relative: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.unitsStyle = .full
+        return formatter
+    }()
 }
 
 private struct TargetCard: View {
