@@ -9,10 +9,10 @@ struct LiveClaudeSession {
 /// are never returned, logged or persisted. This is a UI hint, never a hook authorization.
 enum LiveSessionReader {
     static func claudeSessions(home: URL) -> [LiveClaudeSession] {
-        processes().compactMap { process in
+        let cliRoot = home.appendingPathComponent(".local/share/claude/versions").path + "/"
+        let desktopRoot = home.appendingPathComponent("Library/Application Support/Claude").path + "/"
+        return processes().compactMap { process in
             let path = process.path
-            let cliRoot = home.appendingPathComponent(".local/share/claude/versions").path + "/"
-            let desktopRoot = home.appendingPathComponent("Library/Application Support/Claude").path + "/"
             let isClaude = path.hasPrefix(cliRoot) ||
                 (path.hasSuffix("/claude") && (path.hasPrefix(desktopRoot) || path.contains("/Claude.app/")))
             guard isClaude else { return nil }
@@ -31,14 +31,28 @@ enum LiveSessionReader {
         processes().contains { $0.path.hasSuffix("/Claude.app/Contents/MacOS/Claude") }
     }
 
+    private static let cacheLock = NSLock()
+    private static var cachedProcesses: (date: Date, list: [(pid: pid_t, path: String)])?
+
+    /// One status refresh asks for Claude sessions, Claude desktop and Cursor separately.
+    /// A one-second cache lets those share a single scan of every process on the Mac.
     private static func processes() -> [(pid: pid_t, path: String)] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cached = cachedProcesses, Date().timeIntervalSince(cached.date) < 1 { return cached.list }
+        let list = scanProcesses()
+        cachedProcesses = (Date(), list)
+        return list
+    }
+
+    private static func scanProcesses() -> [(pid: pid_t, path: String)] {
         let count = proc_listallpids(nil, 0)
         guard count > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(count) + 128)
         let actual = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         guard actual > 0 else { return [] }
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return pids.prefix(Int(actual)).compactMap { pid in
-            var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             let result = path.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
             return result > 0 ? (pid, String(cString: path)) : nil
         }
@@ -69,12 +83,15 @@ enum LiveSessionReader {
         guard consume() != nil else { return [:] } // Executable path.
         while index < bytes.count && bytes[index] == 0 { index += 1 }
         for _ in 0..<argc { guard consume() != nil else { return [:] } }
+        // Match keys on raw bytes so only the two identity values are ever decoded,
+        // not every environment variable of every Claude process.
+        let keys = ["CLAUDE_CODE_USER_EMAIL", "CLAUDE_CODE_ACCOUNT_UUID"].map { ($0, Array(($0 + "=").utf8)) }
         var identity: [String: String] = [:]
-        while index < bytes.count, let entry = consume(), !entry.isEmpty {
-            guard let split = entry.firstIndex(of: "=") else { continue }
-            let key = String(entry[..<split])
-            if ["CLAUDE_CODE_USER_EMAIL", "CLAUDE_CODE_ACCOUNT_UUID"].contains(key) {
-                identity[key] = String(entry[entry.index(after: split)...])
+        while index < bytes.count, let end = bytes[index...].firstIndex(of: 0), end > index {
+            let entry = bytes[index..<end]
+            index = end + 1
+            for (key, prefix) in keys where entry.starts(with: prefix) {
+                identity[key] = String(bytes: entry.dropFirst(prefix.count), encoding: .utf8)
             }
         }
         return identity
