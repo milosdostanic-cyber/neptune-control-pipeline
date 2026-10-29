@@ -8,7 +8,7 @@ public enum HookTarget: String, Codable, CaseIterable, Identifiable {
     public var configuration: String { self == .claudeCode ? "settings.json" : "hooks.json" }
 }
 
-public struct HookStatus: Identifiable {
+public struct HookStatus: Identifiable, Equatable {
     public let target: HookTarget
     public let registeredHooks: Int
     public let originalScripts: Int
@@ -73,7 +73,8 @@ public struct HookChange {
 
 /// Owns local hook configuration and the account-checking hook runner.
 /// The control UI makes no network requests. Approved events use the saved Neptune scripts.
-public final class HookController {
+/// All stored properties are immutable; the app serializes calls on one background queue.
+public final class HookController: @unchecked Sendable {
     public let home: URL
     public let storage: URL
     private let fm = FileManager.default

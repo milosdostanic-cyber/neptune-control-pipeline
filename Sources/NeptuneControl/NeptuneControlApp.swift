@@ -19,8 +19,12 @@ final class ControlModel: ObservableObject {
     @Published var busy = false
     @Published var message: String?
     @Published var error: String?
-    @Published var updated = Date()
     let controller: HookController
+    /// Status reads scan processes and hook files, so they stay off the main thread.
+    /// The queue is serial: reads and collection changes never overlap.
+    private let statusQueue = DispatchQueue(label: "local.milos.neptune-control.status", qos: .utility)
+    private var refreshing = false
+    private var refreshAgain = false
     let preview: Bool
     let statsClient: NeptuneStatsClient?
     @Published var showStatsConnection = false
@@ -68,15 +72,35 @@ final class ControlModel: ObservableObject {
     var hasErrors: Bool { statuses.contains { $0.issue != nil } }
 
     func refresh() {
-        if controller.competingInstallerPresent {
-            do { try controller.prepareProtection() }
-            catch { self.error = error.localizedDescription }
+        guard !refreshing else { refreshAgain = true; return }
+        refreshing = true
+        Task {
+            let (fresh, protectionError) = await onStatusQueue { controller -> ([HookStatus], String?) in
+                var protectionError: String?
+                if controller.competingInstallerPresent {
+                    do { try controller.prepareProtection() }
+                    catch { protectionError = error.localizedDescription }
+                }
+                return (controller.statuses(), protectionError)
+            }
+            if let protectionError { error = protectionError }
+            if statuses.map({ $0.account.email }) != fresh.map({ $0.account.email }) { message = nil }
+            // Publishing identical statuses would redraw the window and menu bar item every tick.
+            if statuses != fresh { statuses = fresh }
+            publishWidgetStatus()
+            refreshing = false
+            if refreshAgain {
+                refreshAgain = false
+                refresh()
+            }
         }
-        let fresh = controller.statuses()
-        if statuses.map({ $0.account.email }) != fresh.map({ $0.account.email }) { message = nil }
-        statuses = fresh
-        updated = Date()
-        publishWidgetStatus()
+    }
+
+    private func onStatusQueue<T>(_ work: @escaping (HookController) -> T) async -> T {
+        let controller = controller
+        return await withCheckedContinuation { continuation in
+            statusQueue.async { continuation.resume(returning: work(controller)) }
+        }
     }
 
     private func publishWidgetStatus() {
@@ -103,11 +127,11 @@ final class ControlModel: ObservableObject {
         error = nil
         message = nil
         Task { @MainActor in
-            await Task.yield()
-            do {
-                try controller.setEnabled(enabled, for: target)
-                message = nil
-            } catch { self.error = error.localizedDescription }
+            let failure = await onStatusQueue { controller -> String? in
+                do { try controller.setEnabled(enabled, for: target); return nil }
+                catch { return error.localizedDescription }
+            }
+            if let failure { self.error = failure } else { message = nil }
             refresh()
             busy = false
         }
@@ -119,11 +143,13 @@ final class ControlModel: ObservableObject {
         error = nil
         message = nil
         Task { @MainActor in
-            await Task.yield()
-            var failed: [String] = []
-            for target in HookTarget.allCases {
-                do { try controller.setEnabled(false, for: target) }
-                catch { failed.append("\(target.title): \(error.localizedDescription)") }
+            let failed = await onStatusQueue { controller -> [String] in
+                var failed: [String] = []
+                for target in HookTarget.allCases {
+                    do { try controller.setEnabled(false, for: target) }
+                    catch { failed.append("\(target.title): \(error.localizedDescription)") }
+                }
+                return failed
             }
             refresh()
             if failed.isEmpty { message = "Collection is off in both apps." }
@@ -171,8 +197,13 @@ struct NeptuneControlApp: App {
         MenuBarExtra {
             MenuControls(model: model)
         } label: {
-            NeptuneLogo().frame(width: 14, height: 17)
-                .accessibilityLabel("Neptune Control")
+            // The status item ignores SwiftUI frames and sizes itself from the image,
+            // so the label must be an image that is already menu-bar sized.
+            if let icon = NeptuneLogo.menuBarIcon {
+                Image(nsImage: icon).accessibilityLabel("Neptune Control")
+            } else {
+                Text("Neptune")
+            }
         }
     }
 }
@@ -401,8 +432,32 @@ private struct ActiveDot: View {
 }
 
 private struct NeptuneLogo: View {
+    static let source = Bundle.main.url(forResource: "NeptuneLogo", withExtension: "png").flatMap(NSImage.init(contentsOf:))
+
+    /// A 16-point-high template rendered once at 1x and 2x, so the menu bar neither
+    /// expands to the source PNG's size nor resamples the full image on every redraw.
+    static let menuBarIcon: NSImage? = {
+        guard let source, source.size.height > 0 else { return nil }
+        let size = NSSize(width: (16 * source.size.width / source.size.height).rounded(), height: 16)
+        let icon = NSImage(size: size)
+        for scale in [1, 2] {
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width) * scale, pixelsHigh: Int(size.height) * scale,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { continue }
+            rep.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSGraphicsContext.current?.imageInterpolation = .high
+            source.draw(in: NSRect(origin: .zero, size: size))
+            NSGraphicsContext.restoreGraphicsState()
+            icon.addRepresentation(rep)
+        }
+        icon.isTemplate = true
+        return icon
+    }()
+
     var body: some View {
-        if let url = Bundle.main.url(forResource: "NeptuneLogo", withExtension: "png"), let logo = NSImage(contentsOf: url) {
+        if let logo = Self.source {
             Image(nsImage: logo).resizable().scaledToFit()
         }
     }

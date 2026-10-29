@@ -13,7 +13,7 @@ public enum AccountConnection {
     }
 }
 
-public struct AccountIdentity {
+public struct AccountIdentity: Equatable {
     public let email: String?
     public let connection: AccountConnection
     public let sessionEmails: [String]
